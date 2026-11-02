@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">지하철 역알림</string>
+    <string name="channel_tracking">역 추적 상태</string>
+    <string name="channel_alerts">정차역 알림</string>
+</resources>

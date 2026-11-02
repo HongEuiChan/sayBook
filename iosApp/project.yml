@@ -1,0 +1,63 @@
+# XcodeGen 설정: `brew install xcodegen && xcodegen generate` 로 SubwayAlert.xcodeproj 생성
+name: SubwayAlert
+options:
+  bundleIdPrefix: com.saybook
+  deploymentTarget:
+    iOS: "16.2"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: ""   # 본인 Apple 개발팀 ID 입력
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  SubwayAlert:
+    type: application
+    platform: iOS
+    sources:
+      - iosApp
+      - ActivityShared
+    dependencies:
+      - target: StationLiveActivity
+    preBuildScripts:
+      - name: Build Kotlin shared framework
+        basedOnDependencyAnalysis: false
+        script: |
+          cd "$SRCROOT/.."
+          ./gradlew :shared:embedAndSignAppleFrameworkForXcode
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.saybook.subway
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        FRAMEWORK_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)"
+        OTHER_LDFLAGS: "$(inherited) -framework Shared"
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+    info:
+      path: iosApp/Info.plist
+      properties:
+        CFBundleDisplayName: 지하철 역알림
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSSupportsLiveActivities: true
+        UIBackgroundModes: [location]
+        NSMotionUsageDescription: 열차의 출발과 정차를 감지해 지금 역을 알려드리기 위해 움직임 센서를 사용합니다.
+        NSLocationWhenInUseUsageDescription: 다른 앱에서 영상을 보는 동안에도 정차역 감지를 이어가기 위해 위치 백그라운드 모드를 사용합니다. 위치 정보는 저장하거나 전송하지 않습니다.
+
+  StationLiveActivity:
+    type: app-extension
+    platform: iOS
+    sources:
+      - StationLiveActivity
+      - ActivityShared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.saybook.subway.LiveActivity
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+    info:
+      path: StationLiveActivity/Info.plist
+      properties:
+        CFBundleDisplayName: 역알림
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
