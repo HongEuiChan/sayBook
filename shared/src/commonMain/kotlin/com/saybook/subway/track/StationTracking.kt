@@ -100,6 +100,13 @@ class TripTracker(
                 state = s.copy(phase = TripPhase.RUNNING)
                 null
             }
+
+            is DetectorEvent.DepartureCancelled -> {
+                // 화면을 조용히 '이번 역' 으로 되돌림 (알림 없음)
+                if (s.phase != TripPhase.RUNNING) return null
+                state = s.copy(phase = TripPhase.AT_STATION)
+                null
+            }
         }
     }
 

@@ -28,6 +28,9 @@ sealed class RideSegment {
 
     /** 정차 중 사용자가 휴대폰을 크게 움직임 (오탐 테스트용) */
     data class HandMovement(override val durationMs: Long, val magnitude: Double = 0.4) : RideSegment()
+
+    /** 사람이 걷는 중 (약 2Hz 발걸음 충격 + 잔진동) */
+    data class Walking(override val durationMs: Long, val intensity: Double = 2.5) : RideSegment()
 }
 
 /**
@@ -76,6 +79,14 @@ class RideSimulator(
                 ax += seg.magnitude * sin(phase) + gauss(0.1)
                 ay += seg.magnitude * cos(phase * 1.3) + gauss(0.1)
                 az += gauss(0.1)
+            }
+
+            is RideSegment.Walking -> {
+                val stepPhase = (localMs % 500) / 500.0
+                val impact = if (stepPhase < 0.1) seg.intensity * 2 else 0.0
+                ax += gauss(seg.intensity * 0.6)
+                ay += gauss(seg.intensity * 0.6) + impact
+                az += gauss(seg.intensity * 0.6)
             }
 
             is RideSegment.Run -> {

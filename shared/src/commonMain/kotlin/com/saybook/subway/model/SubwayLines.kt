@@ -54,7 +54,30 @@ object SubwayLines {
         ),
     )
 
-    val all: List<SubwayLine> = listOf(line2, line3, line4)
+    /**
+     * 신분당선. 좌표가 있는 역은 실제 탑승 중 역사 안에서 잡힌 정확한 위치(오차 15~75m)로 채운 값입니다.
+     * 나머지 역은 공공데이터로 채우세요.
+     */
+    val sinbundang = SubwayLine(
+        id = "sinbundang",
+        name = "신분당선",
+        colorHex = 0xD4003B,
+        stations = listOf(
+            Station("신사"), Station("논현"), Station("신논현"), Station("강남"), Station("양재"),
+            Station("양재시민의숲", 37.47016, 127.03891),
+            Station("청계산입구", 37.44818, 127.05475),
+            Station("판교", 37.39484, 127.11122),
+            Station("정자"),
+            Station("미금", 37.35003, 127.10847),
+            Station("동천"),
+            Station("수지구청", 37.32255, 127.09483),
+            Station("성복"), Station("상현"),
+            Station("광교중앙", 37.28830, 127.05230),
+            Station("광교"),
+        ),
+    )
+
+    val all: List<SubwayLine> = listOf(line2, line3, line4, sinbundang)
 
     fun byId(id: String): SubwayLine? = all.firstOrNull { it.id == id }
 }

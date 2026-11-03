@@ -22,22 +22,45 @@ data class DetectorConfig(
     val windowMs: Long = 2_000,
     /** 수평 가속도(견인/제동) 평활화 시정수 */
     val horizontalTauMs: Long = 1_500,
+    /**
+     * 진동 RMS 계산 전 고역통과: 최근 N 샘플 이동평균을 빼서 손 움직임(저주파)을 걸러내고
+     * 레일 진동(고주파)만 남김. 50Hz 기준 5샘플 ≈ 5Hz 이상. 0 이면 끔.
+     *
+     * 실측(신분당선, 손에 들고 시청): 주행 0.2~0.5, 정차 0.03~0.13 m/s².
+     * 고역통과 없이 보면 정차 중에도 손 움직임 때문에 0.1~0.7 이 나와 구분이 안 됨.
+     */
+    val highPassSamples: Int = 5,
     /** 이 값보다 진동 RMS 가 크면 '움직임' (m/s²) */
-    val movingRms: Double = 0.10,
+    val movingRms: Double = 0.20,
     /** 이 값보다 진동 RMS 가 작으면 '정지' (m/s²) */
-    val stillRms: Double = 0.05,
-    /** 열차 가·감속으로 보는 평활 수평 가속도 (m/s²). 지하철은 보통 0.7~1.0 m/s² */
-    val tractionAccel: Double = 0.30,
+    val stillRms: Double = 0.10,
     /** 이 값보다 진동 RMS 가 크면 사람이 걷는 중으로 보고 열차 움직임으로 치지 않음 */
     val walkingRms: Double = 1.2,
+    /**
+     * 주행 중 이 세기([walkingArriveRms]) 이상의 걷기가 [walkingArriveMs] 이어지면 '내렸다' = 정차로 봄.
+     * 목적지에서는 열차가 서자마자 일어나 걸어 나가므로 정지 구간이 거의 없음 (실측: 강남).
+     * 자리에서 일어나 문 앞으로 가는 정도(1~1.7)는 넘지 않도록 높게 잡음.
+     */
+    val walkingArriveRms: Double = 2.0,
+    val walkingArriveMs: Long = 6_000,
     /** 움직임이 이만큼 이어져야 '출발' 확정 */
     val departConfirmMs: Long = 8_000,
     /** 정지가 이만큼 이어져야 '정차' 확정 */
     val stopConfirmMs: Long = 5_000,
     /** 출발 후보 상태에서 정지가 이만큼 이어지면 오탐(손 흔들림 등)으로 보고 취소 */
     val departCancelStillMs: Long = 2_000,
+    /**
+     * 출발 후 이 시간 안에 다시 멈추면 출발 자체가 오탐(정차 중 승하차·휴대폰 움직임)이었다고 보고 취소.
+     * 실측에서 정차 중 오탐 출발은 10~12초 뒤 다시 멈췄음.
+     */
+    val falseDepartureMs: Long = 20_000,
     /** 출발부터 정차까지 최소 주행 시간. 이보다 짧은 정차는 신호대기로 간주 */
     val minRunMs: Long = 40_000,
+    /**
+     * 걷기가 끝난 뒤 이 시간 동안은 출발로 판정하지 않음.
+     * 내려서 걸어갈 때 약한 걸음(0.6~0.8)은 걷기 기준 아래라 '움직임' 으로 보이기 때문 (실측: 강남 하차 후).
+     */
+    val departAfterWalkingMs: Long = 15_000,
     /** 샘플 간격이 이보다 크면(센서 중단) 내부 창을 초기화 */
     val maxSampleGapMs: Long = 1_000,
     /** 역사 신호([TrainMotionDetector.stationHint])가 유효한 시간 */
@@ -69,6 +92,9 @@ sealed class DetectorEvent {
 
     /** 역 사이 정지 후 다시 움직임 */
     data class Resumed(override val timestampMs: Long) : DetectorEvent()
+
+    /** 직전 '출발' 이 오탐이었음 (곧바로 다시 멈춤) → 아직 그 역에 정차 중 */
+    data class DepartureCancelled(override val timestampMs: Long) : DetectorEvent()
 }
 
 /**
@@ -99,6 +125,16 @@ class TrainMotionDetector(val config: DetectorConfig = DetectorConfig()) {
 
     var features: MotionFeatures = MotionFeatures()
         private set
+
+    // 고역통과용 최근 샘플
+    private val recentX = ArrayDeque<Double>()
+    private val recentY = ArrayDeque<Double>()
+    private val recentZ = ArrayDeque<Double>()
+
+    // 걷기 (내림) 추적: 2초 이내 끊김은 이어진 것으로 봄
+    private var strongWalkSince: Long? = null
+    private var lastStrongWalkAt: Long = 0
+    private var lastWalkingAt: Long? = null
 
     // 진동 RMS 이동 창
     private val windowTimes = ArrayDeque<Long>()
@@ -166,12 +202,21 @@ class TrainMotionDetector(val config: DetectorConfig = DetectorConfig()) {
         } else if (cls != MotionClass.UNCERTAIN) {
             movingSince = null
         }
+        if (features.vibrationRms > config.walkingArriveRms) {
+            if (strongWalkSince == null || t - lastStrongWalkAt > 2_000) strongWalkSince = t
+            lastStrongWalkAt = t
+        } else if (t - lastStrongWalkAt > 2_000) {
+            strongWalkSince = null
+        }
+        val walkedOff = strongWalkSince?.let { t - it >= config.walkingArriveMs } ?: false
+        if (cls == MotionClass.WALKING) lastWalkingAt = t
+        val recentlyWalked = lastWalkingAt?.let { t - it < config.departAfterWalkingMs } ?: false
 
         return when (state) {
             State.STOPPED -> {
                 hintExpiresAt = null
                 val since = movingSince
-                if (since != null) {
+                if (since != null && !recentlyWalked) {
                     state = State.DEPARTING
                     candidateStart = since
                 }
@@ -208,8 +253,17 @@ class TrainMotionDetector(val config: DetectorConfig = DetectorConfig()) {
                         DetectorEvent.Arrived(still)
                     }
 
+                    // 주행 중 한참 걸음 → 열차에서 내림
+                    walkedOff && strongWalkSince!! - departedAt >= config.minRunMs -> {
+                        state = State.STOPPED
+                        DetectorEvent.Arrived(strongWalkSince!!)
+                    }
+
                     still != null && t - still >= config.stopConfirmMs -> {
-                        if (still - departedAt >= config.minRunMs) {
+                        if (still - departedAt < config.falseDepartureMs) {
+                            state = State.STOPPED
+                            DetectorEvent.DepartureCancelled(still)
+                        } else if (still - departedAt >= config.minRunMs) {
                             state = State.STOPPED
                             DetectorEvent.Arrived(still)
                         } else {
@@ -225,8 +279,8 @@ class TrainMotionDetector(val config: DetectorConfig = DetectorConfig()) {
 
             State.HALTED -> {
                 val since = movingSince
-                if (hintActive) {
-                    // 신호대기로 봤던 정지가 사실은 역 (역간 거리가 짧은 구간)
+                if (hintActive || walkedOff) {
+                    // 신호대기로 봤던 정지가 사실은 역 (역간 거리가 짧은 구간이거나 거기서 내림)
                     hintExpiresAt = null
                     state = State.STOPPED
                     DetectorEvent.Arrived(haltedAt)
@@ -241,8 +295,21 @@ class TrainMotionDetector(val config: DetectorConfig = DetectorConfig()) {
     }
 
     private fun updateFeatures(s: MotionSample, dtMs: Long) {
-        // 1) 진동 RMS
-        val sq = s.userX * s.userX + s.userY * s.userY + s.userZ * s.userZ
+        // 1) 진동 RMS (고역통과 후)
+        var vx = s.userX
+        var vy = s.userY
+        var vz = s.userZ
+        val n = config.highPassSamples
+        if (n > 0) {
+            recentX.addLast(s.userX); recentY.addLast(s.userY); recentZ.addLast(s.userZ)
+            if (recentX.size > n + 1) {
+                recentX.removeFirst(); recentY.removeFirst(); recentZ.removeFirst()
+            }
+            vx -= recentX.sum() / recentX.size
+            vy -= recentY.sum() / recentY.size
+            vz -= recentZ.sum() / recentZ.size
+        }
+        val sq = vx * vx + vy * vy + vz * vz
         windowTimes.addLast(s.timestampMs)
         windowSquares.addLast(sq)
         windowSum += sq
@@ -278,8 +345,9 @@ class TrainMotionDetector(val config: DetectorConfig = DetectorConfig()) {
 
         val cls = when {
             rms > config.walkingRms -> MotionClass.WALKING
-            rms > config.movingRms || horizontal > config.tractionAccel -> MotionClass.MOVING
-            rms < config.stillRms && horizontal < config.tractionAccel / 2 -> MotionClass.STILL
+            rms > config.movingRms -> MotionClass.MOVING
+            // 평활 수평가속도는 손 움직임에도 커지므로 정지 판정에 쓰지 않음 (실측에서 정차를 다수 놓침)
+            rms < config.stillRms -> MotionClass.STILL
             else -> MotionClass.UNCERTAIN
         }
         features = MotionFeatures(rms, horizontal, cls)
@@ -289,6 +357,9 @@ class TrainMotionDetector(val config: DetectorConfig = DetectorConfig()) {
         windowTimes.clear()
         windowSquares.clear()
         windowSum = 0.0
+        recentX.clear(); recentY.clear(); recentZ.clear()
+        strongWalkSince = null
+        lastWalkingAt = null
         hx = 0.0; hy = 0.0; hz = 0.0
         lastTimestamp = null
         stillSince = null

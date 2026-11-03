@@ -49,8 +49,8 @@ class StationTrackingTest {
         val ev = events(
             listOf(
                 RideSegment.Dwell(20_000),
-                // 출발 직후 20초 만에 신호대기로 멈춤
-                RideSegment.Run(accelMs = 8_000, cruiseMs = 4_000, brakeMs = 8_000),
+                // 출발 후 26초 만에 역 사이에서 신호대기로 멈춤
+                RideSegment.Run(accelMs = 8_000, cruiseMs = 10_000, brakeMs = 8_000),
                 RideSegment.Dwell(15_000),
                 RideSegment.Run(),
                 RideSegment.Dwell(20_000),
@@ -65,6 +65,48 @@ class StationTrackingTest {
             ),
             ev.map { it::class },
         )
+    }
+
+    @Test
+    fun departureThatStopsRightAwayIsCancelled() {
+        // 정차 중 휴대폰을 움직여 '출발' 로 오인 → 곧 다시 멈춤 → 출발 취소 (역은 그대로)
+        val ev = events(
+            listOf(
+                RideSegment.Dwell(20_000),
+                RideSegment.Run(accelMs = 4_000, cruiseMs = 4_000, brakeMs = 4_000, accel = 0.0, vibration = 0.25),
+                RideSegment.Dwell(15_000),
+                RideSegment.Run(),
+                RideSegment.Dwell(20_000),
+            ),
+        )
+        assertEquals(
+            listOf(
+                DetectorEvent.Departed::class,
+                DetectorEvent.DepartureCancelled::class,
+                DetectorEvent.Departed::class,
+                DetectorEvent.Arrived::class,
+            ),
+            ev.map { it::class },
+        )
+    }
+
+    @Test
+    fun walkingOffTheTrainCountsAsArrival() {
+        val line = SubwayLines.line3
+        val session = StationAlertSession(line, 0, Direction.FORWARD)
+        val alerts = mutableListOf<String>()
+        session.setListener { u -> u.alert?.let { alerts += it.title } }
+        // 목적지: 열차가 서자마자 일어나 걸어 나감 (정지 구간 없음), 이후 약하게 걷기
+        RideSimulator(4).generate(
+            listOf(
+                RideSegment.Dwell(20_000),
+                RideSegment.Run(),
+                RideSegment.Walking(10_000),
+                RideSegment.Walking(10_000, intensity = 0.4),
+            ),
+        ).forEach(session::onSample)
+        assertEquals("주엽", session.state.currentStation.name, "$alerts")
+        assertEquals(TripPhase.AT_STATION, session.state.phase, "내린 뒤 걸어도 출발로 보면 안 됨: $alerts")
     }
 
     @Test
