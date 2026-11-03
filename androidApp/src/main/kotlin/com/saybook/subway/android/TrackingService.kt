@@ -7,11 +7,15 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
@@ -27,6 +31,7 @@ import com.saybook.subway.model.Direction
 import com.saybook.subway.model.SubwayLines
 import com.saybook.subway.sim.RideSimulator
 import com.saybook.subway.track.AlertTexts
+import com.saybook.subway.track.AlertKind
 import com.saybook.subway.track.StationAlert
 import com.saybook.subway.track.StationAlertSession
 import com.saybook.subway.track.TrackerUpdate
@@ -41,6 +46,7 @@ import com.saybook.subway.track.TripPhase
 class TrackingService : Service(), SensorEventListener {
 
     private lateinit var sensorManager: SensorManager
+    private lateinit var locationManager: LocationManager
     private lateinit var notificationManager: NotificationManager
     private lateinit var overlay: StationOverlay
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -63,6 +69,7 @@ class TrackingService : Service(), SensorEventListener {
     override fun onCreate() {
         super.onCreate()
         sensorManager = getSystemService(SensorManager::class.java)
+        locationManager = getSystemService(LocationManager::class.java)
         notificationManager = getSystemService(NotificationManager::class.java)
         overlay = StationOverlay(this)
         createChannels()
@@ -92,11 +99,7 @@ class TrackingService : Service(), SensorEventListener {
             this,
             NOTIFICATION_ID_ONGOING,
             buildOngoingNotification(newSession.state.let(AlertTexts::compact)),
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-            } else {
-                0
-            },
+            foregroundServiceTypes(),
         )
         overlay.show(line.colorHex.toInt())
 
@@ -107,7 +110,57 @@ class TrackingService : Service(), SensorEventListener {
 
         handler.post {
             newSession.setListener { update -> mainHandler.post { render(update) } }
-            if (demo) startDemo(handler) else registerSensors(handler)
+            if (demo) {
+                startDemo(handler)
+            } else {
+                registerSensors(handler)
+                registerLocation(handler)
+            }
+        }
+    }
+
+    private fun hasLocationPermission(): Boolean =
+        checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+    /** 위치 권한이 있을 때만 location 타입을 붙임 (권한 없이 붙이면 Android 14+ 에서 예외) */
+    private fun foregroundServiceTypes(): Int {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && hasLocationPermission()) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            } else {
+                0
+            }
+        }
+        var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+        if (hasLocationPermission()) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+        return types
+    }
+
+    /**
+     * 한국 지하철 역사에서는 GPS 중계기·와이파이 덕분에 위치가 잠깐 잡히는 경우가 많음.
+     * 터널에서는 안 잡히다가 역에서 잡히는 패턴을 공유 모듈이 정차 신호로 사용합니다.
+     */
+    private val locationListener = LocationListener { location: Location ->
+        val ageMs = (SystemClock.elapsedRealtimeNanos() - location.elapsedRealtimeNanos) / 1_000_000
+        if (ageMs > MAX_LOCATION_AGE_MS) return@LocationListener // 캐시된 옛 위치
+        session?.onLocation(
+            location.elapsedRealtimeNanos / 1_000_000,
+            location.latitude,
+            location.longitude,
+            if (location.hasAccuracy()) location.accuracy.toDouble() else 9_999.0,
+        )
+    }
+
+    @android.annotation.SuppressLint("MissingPermission")
+    private fun registerLocation(handler: Handler) {
+        if (!hasLocationPermission()) return
+        for (provider in listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)) {
+            if (locationManager.allProviders.contains(provider)) {
+                runCatching {
+                    locationManager.requestLocationUpdates(provider, 1_000L, 0f, locationListener, handler.looper)
+                }
+            }
         }
     }
 
@@ -189,7 +242,15 @@ class TrackingService : Service(), SensorEventListener {
         TrackingRepository.publish(state)
         val (title, subtitle) = AlertTexts.compact(state)
         val alert = update.alert
-        overlay.update(title, subtitle, highlight = alert?.important == true)
+        overlay.update(title, subtitle)
+        if (alert != null && (alert.kind == AlertKind.ARRIVED || alert.kind == AlertKind.TERMINAL)) {
+            val next = state.nextStation?.name
+            overlay.showArrival(
+                label = if (alert.kind == AlertKind.TERMINAL) "종착역" else "이번 역",
+                station = state.currentStation.name,
+                detail = next?.let { "다음 역 · $it" } ?: "내리실 준비하세요",
+            )
+        }
         notificationManager.notify(NOTIFICATION_ID_ONGOING, buildOngoingNotification(title to subtitle))
         if (alert != null) onAlert(alert)
         if (state.phase == TripPhase.FINISHED && alert != null) {
@@ -257,6 +318,7 @@ class TrackingService : Service(), SensorEventListener {
 
     private fun stopSensors() {
         sensorManager.unregisterListener(this)
+        locationManager.removeUpdates(locationListener)
         sensorThread?.quitSafely()
         sensorThread = null
         sensorHandler = null
@@ -295,6 +357,7 @@ class TrackingService : Service(), SensorEventListener {
         private const val NOTIFICATION_ID_ALERT = 2
         private const val RAW_GRAVITY_ALPHA = 0.9
         private const val DEMO_SPEEDUP = 10
+        private const val MAX_LOCATION_AGE_MS = 10_000L
 
         fun start(context: Context, lineId: String, startIndex: Int, direction: Direction, demo: Boolean) {
             val intent = Intent(context, TrackingService::class.java)

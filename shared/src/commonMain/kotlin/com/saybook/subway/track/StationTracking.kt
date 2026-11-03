@@ -2,6 +2,7 @@ package com.saybook.subway.track
 
 import com.saybook.subway.detect.DetectorConfig
 import com.saybook.subway.detect.DetectorEvent
+import com.saybook.subway.detect.MotionClass
 import com.saybook.subway.detect.MotionFeatures
 import com.saybook.subway.detect.MotionSample
 import com.saybook.subway.detect.TrainMotionDetector
@@ -124,6 +125,53 @@ class TripTracker(
         return AlertTexts.corrected(state)
     }
 
+    /**
+     * GPS 로 확인된 역 [index] 에 지금 정차해 있음.
+     * 앞으로 이동했으면 도착 알림, 뒤로 이동했으면 보정 알림을 돌려줍니다.
+     */
+    internal fun snapTo(index: Int): StationAlert? {
+        val s = state
+        val delta = stepsTo(index) ?: return null
+        if (delta == 0 && s.phase == TripPhase.AT_STATION) return null
+        val isTerminal = s.line.nextIndex(index, s.direction) == null
+        state = s.copy(
+            currentIndex = index,
+            phase = if (isTerminal) TripPhase.FINISHED else TripPhase.AT_STATION,
+            stationsPassed = (s.stationsPassed + delta).coerceAtLeast(0),
+        )
+        return when {
+            delta > 0 && isTerminal -> AlertTexts.terminal(state)
+            delta > 0 -> AlertTexts.arrived(state)
+            else -> AlertTexts.corrected(state)
+        }
+    }
+
+    /** GPS 로 확인된 역 [index] 에 열차가 진입 중 (아직 움직이는 중): 그 역을 '다음 역' 으로 맞춤 */
+    internal fun approach(index: Int): Boolean {
+        val s = state
+        val delta = stepsTo(index) ?: return false
+        if (delta == 0) return false // 방금 떠난 역의 위치
+        val prev = s.line.previousIndex(index, s.direction) ?: return false
+        if (prev == s.currentIndex && s.phase != TripPhase.AT_STATION) return false
+        state = s.copy(
+            currentIndex = prev,
+            phase = TripPhase.RUNNING,
+            stationsPassed = (s.stationsPassed + delta - 1).coerceAtLeast(0),
+        )
+        return true
+    }
+
+    /** 현재 역에서 [index] 까지 진행 방향 기준 정거장 수 (-1..2), 범위 밖이면 null */
+    private fun stepsTo(index: Int): Int? {
+        val s = state
+        if (index == s.currentIndex) return 0
+        if (s.line.previousIndex(s.currentIndex, s.direction) == index) return -1
+        val next = s.line.nextIndex(s.currentIndex, s.direction) ?: return null
+        if (next == index) return 1
+        if (s.line.nextIndex(next, s.direction) == index) return 2
+        return null
+    }
+
     internal fun updateFeatures(features: MotionFeatures) {
         state = state.copy(features = features)
     }
@@ -161,6 +209,9 @@ class StationAlertSession(
     private val tracker = TripTracker(line, startIndex, direction)
     private var listener: ((TrackerUpdate) -> Unit)? = null
     private var lastFeatureEmitMs = Long.MIN_VALUE
+    private var lastFixMs: Long? = null
+
+    var locationConfig: LocationConfig = LocationConfig()
 
     /** 특징값(디버그 표시)만 바뀐 경우 리스너 호출 최소 간격 */
     var featureEmitIntervalMs: Long = 500
@@ -189,6 +240,44 @@ class StationAlertSession(
         userX: Double, userY: Double, userZ: Double,
         gravityX: Double, gravityY: Double, gravityZ: Double,
     ) = onSample(MotionSample(timestampMs, userX, userY, userZ, gravityX, gravityY, gravityZ))
+
+    /**
+     * 위치 한 건 처리. 한국 지하철은 역사 안에서 GPS/와이파이 위치가 잠깐 잡히는 경우가 많아
+     * 이를 센서 감지의 보정 신호로 씁니다.
+     *
+     * 1. 역 좌표가 있으면: 가까운 후보 역과 맞춰 현재 역을 바로잡음
+     * 2. 좌표가 없거나 맞는 역이 없으면: 한동안 끊겼던 위치가 다시 잡힌 것을
+     *    '역사에 들어왔다' 는 신호로 감지기에 전달 (정차 확정을 앞당김)
+     */
+    fun onLocation(fix: LocationFix) {
+        if (fix.accuracyM > locationConfig.maxAccuracyM) return
+        val gap = lastFixMs?.let { fix.timestampMs - it }
+        lastFixMs = fix.timestampMs
+        if (tracker.state.phase == TripPhase.FINISHED) return
+
+        val matched = StationMatcher.match(tracker.state, fix, locationConfig)
+        if (matched != null) {
+            val stopped = detector.features.motionClass == MotionClass.STILL ||
+                detector.state == TrainMotionDetector.State.STOPPED ||
+                detector.state == TrainMotionDetector.State.HALTED
+            if (stopped) {
+                val alert = tracker.snapTo(matched)
+                if (alert != null) {
+                    detector.reset()
+                    listener?.invoke(TrackerUpdate(tracker.state, alert))
+                }
+            } else if (tracker.approach(matched)) {
+                listener?.invoke(TrackerUpdate(tracker.state, null))
+            }
+            return
+        }
+
+        if (gap == null || gap >= locationConfig.reappearGapMs) detector.stationHint()
+    }
+
+    /** Swift 에서 쓰기 쉬운 원시값 버전 */
+    fun onLocation(timestampMs: Long, latitude: Double, longitude: Double, accuracyM: Double) =
+        onLocation(LocationFix(timestampMs, latitude, longitude, accuracyM))
 
     fun stepForward() = correct { tracker.stepForward() }
 

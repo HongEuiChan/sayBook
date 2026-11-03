@@ -91,11 +91,15 @@ private fun PermissionBar() {
     var canOverlay by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { canOverlay = Settings.canDrawOverlays(context) }
 
-    val notificationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    // 알림 + 위치(역사에서 잡히는 GPS/와이파이로 정차 보정) 권한
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
     LaunchedEffect(Unit) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        val permissions = buildList {
+            add(Manifest.permission.ACCESS_FINE_LOCATION)
+            add(Manifest.permission.ACCESS_COARSE_LOCATION)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) add(Manifest.permission.POST_NOTIFICATIONS)
         }
+        permissionLauncher.launch(permissions.toTypedArray())
     }
 
     if (!canOverlay) {

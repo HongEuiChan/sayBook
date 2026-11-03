@@ -40,6 +40,10 @@ data class DetectorConfig(
     val minRunMs: Long = 40_000,
     /** 샘플 간격이 이보다 크면(센서 중단) 내부 창을 초기화 */
     val maxSampleGapMs: Long = 1_000,
+    /** 역사 신호([TrainMotionDetector.stationHint])가 유효한 시간 */
+    val stationHintValidMs: Long = 20_000,
+    /** 역사 신호가 있을 때 정차로 확정하는 데 필요한 최소 정지 시간 */
+    val stationHintStillMs: Long = 1_000,
 )
 
 enum class MotionClass { STILL, MOVING, WALKING, UNCERTAIN }
@@ -111,8 +115,23 @@ class TrainMotionDetector(val config: DetectorConfig = DetectorConfig()) {
     private var movingSince: Long? = null
     private var candidateStart: Long = 0
     private var departedAt: Long = 0
+    private var haltedAt: Long = 0
+
+    // 역사 신호: 다음 샘플에서 만료 시각을 정함
+    private var hintRequested = false
+    private var hintExpiresAt: Long? = null
+
+    /**
+     * '지금 역사 안에 있다' 는 외부 신호 (예: 지하에서 끊겼던 GPS 가 다시 잡힘).
+     * 주행 중 멈춰 있으면 정차 확정을 앞당기고, 신호대기로 본 짧은 구간도 정차로 바로잡습니다.
+     */
+    fun stationHint() {
+        hintRequested = true
+    }
 
     fun reset() {
+        hintRequested = false
+        hintExpiresAt = null
         state = State.STOPPED
         features = MotionFeatures()
         clearSignal()
@@ -129,6 +148,13 @@ class TrainMotionDetector(val config: DetectorConfig = DetectorConfig()) {
         updateFeatures(sample, dt)
         val cls = features.motionClass
 
+        if (hintRequested) {
+            hintRequested = false
+            hintExpiresAt = t + config.stationHintValidMs
+        }
+        val hintActive = hintExpiresAt?.let { t <= it } ?: false
+        if (!hintActive) hintExpiresAt = null
+
         // 연속 정지/움직임 구간 추적
         if (cls == MotionClass.STILL) {
             if (stillSince == null) stillSince = t
@@ -143,6 +169,7 @@ class TrainMotionDetector(val config: DetectorConfig = DetectorConfig()) {
 
         return when (state) {
             State.STOPPED -> {
+                hintExpiresAt = null
                 val since = movingSince
                 if (since != null) {
                     state = State.DEPARTING
@@ -152,6 +179,7 @@ class TrainMotionDetector(val config: DetectorConfig = DetectorConfig()) {
             }
 
             State.DEPARTING -> {
+                hintExpiresAt = null
                 val still = stillSince
                 when {
                     cls == MotionClass.WALKING ||
@@ -172,22 +200,37 @@ class TrainMotionDetector(val config: DetectorConfig = DetectorConfig()) {
 
             State.RUNNING -> {
                 val still = stillSince
-                if (still != null && t - still >= config.stopConfirmMs) {
-                    if (still - departedAt >= config.minRunMs) {
+                when {
+                    // 역사 신호 + 잠깐의 정지 → 바로 정차 확정 (최소 주행 시간도 무시)
+                    hintActive && still != null && t - still >= config.stationHintStillMs -> {
+                        hintExpiresAt = null
                         state = State.STOPPED
                         DetectorEvent.Arrived(still)
-                    } else {
-                        state = State.HALTED
-                        DetectorEvent.HaltedBetweenStations(still)
                     }
-                } else {
-                    null
+
+                    still != null && t - still >= config.stopConfirmMs -> {
+                        if (still - departedAt >= config.minRunMs) {
+                            state = State.STOPPED
+                            DetectorEvent.Arrived(still)
+                        } else {
+                            state = State.HALTED
+                            haltedAt = still
+                            DetectorEvent.HaltedBetweenStations(still)
+                        }
+                    }
+
+                    else -> null
                 }
             }
 
             State.HALTED -> {
                 val since = movingSince
-                if (since != null && t - since >= config.departConfirmMs) {
+                if (hintActive) {
+                    // 신호대기로 봤던 정지가 사실은 역 (역간 거리가 짧은 구간)
+                    hintExpiresAt = null
+                    state = State.STOPPED
+                    DetectorEvent.Arrived(haltedAt)
+                } else if (since != null && t - since >= config.departConfirmMs) {
                     state = State.RUNNING
                     DetectorEvent.Resumed(since)
                 } else {

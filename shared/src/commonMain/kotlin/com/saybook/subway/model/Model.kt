@@ -2,7 +2,12 @@ package com.saybook.subway.model
 
 data class Station(
     val name: String,
-)
+    /** 역 중심 좌표 (WGS84). 있으면 역사에서 잡힌 GPS 위치로 현재 역을 자동 보정합니다. */
+    val latitude: Double? = null,
+    val longitude: Double? = null,
+) {
+    val hasCoordinates: Boolean get() = latitude != null && longitude != null
+}
 
 data class SubwayLine(
     val id: String,

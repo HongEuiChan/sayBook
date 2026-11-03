@@ -33,6 +33,11 @@ targets:
         FRAMEWORK_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)"
         OTHER_LDFLAGS: "$(inherited) -framework Shared"
         ENABLE_USER_SCRIPT_SANDBOXING: NO
+    entitlements:
+      path: iosApp/SubwayAlert.entitlements
+      properties:
+        # 집중 모드에서도 정차 알림 배너가 영상 위에 뜨도록
+        com.apple.developer.usernotifications.time-sensitive: true
     info:
       path: iosApp/Info.plist
       properties:
@@ -42,7 +47,7 @@ targets:
         NSSupportsLiveActivities: true
         UIBackgroundModes: [location]
         NSMotionUsageDescription: 열차의 출발과 정차를 감지해 지금 역을 알려드리기 위해 움직임 센서를 사용합니다.
-        NSLocationWhenInUseUsageDescription: 다른 앱에서 영상을 보는 동안에도 정차역 감지를 이어가기 위해 위치 백그라운드 모드를 사용합니다. 위치 정보는 저장하거나 전송하지 않습니다.
+        NSLocationWhenInUseUsageDescription: 역사 안에서 잡히는 위치로 정차역을 더 정확히 알려드리고, 다른 앱에서 영상을 보는 동안에도 감지를 이어가기 위해 위치를 사용합니다. 위치 정보는 저장하거나 전송하지 않습니다.
 
   StationLiveActivity:
     type: app-extension

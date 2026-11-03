@@ -21,8 +21,9 @@ final class TrackingController: NSObject, ObservableObject {
         return q
     }()
 
-    /// iOS 는 백그라운드 앱의 센서 수집을 멈추므로, 영상 앱을 보는 동안 앱이 살아 있도록
-    /// 저정밀 위치 업데이트(백그라운드 위치 모드)를 함께 켭니다. 위치 값 자체는 쓰지 않습니다.
+    /// 위치 업데이트는 두 가지 역할:
+    /// 1. iOS 는 백그라운드 앱의 센서 수집을 멈추므로, 영상 앱을 보는 동안 앱을 살려 둠 (백그라운드 위치 모드)
+    /// 2. 한국 지하철 역사에서 잠깐 잡히는 GPS/와이파이 위치를 정차 보정 신호로 사용
     private let keepAlive = CLLocationManager()
 
     private var session: StationAlertSession?
@@ -31,8 +32,9 @@ final class TrackingController: NSObject, ObservableObject {
 
     override init() {
         super.init()
-        keepAlive.desiredAccuracy = kCLLocationAccuracyThreeKilometers
-        keepAlive.distanceFilter = CLLocationDistanceMax
+        keepAlive.delegate = self
+        keepAlive.desiredAccuracy = kCLLocationAccuracyBest
+        keepAlive.distanceFilter = kCLDistanceFilterNone
         keepAlive.pausesLocationUpdatesAutomatically = false
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
@@ -82,6 +84,19 @@ final class TrackingController: NSObject, ObservableObject {
     func stepBack() {
         guard let s = session else { return }
         sensorQueue.async { s.stepBack() }
+    }
+
+    // MARK: - 위치
+
+    fileprivate func feed(_ locations: [CLLocation]) {
+        guard let s = session else { return }
+        for loc in locations where loc.horizontalAccuracy >= 0 && -loc.timestamp.timeIntervalSinceNow < 10 {
+            let t = Int64(loc.timestamp.timeIntervalSince1970 * 1000)
+            let lat = loc.coordinate.latitude
+            let lon = loc.coordinate.longitude
+            let acc = loc.horizontalAccuracy
+            sensorQueue.async { s.onLocation(timestampMs: t, latitude: lat, longitude: lon, accuracyM: acc) }
+        }
     }
 
     // MARK: - 센서
@@ -188,5 +203,15 @@ final class TrackingController: NSObject, ObservableObject {
         content.interruptionLevel = .timeSensitive
         let request = UNNotificationRequest(identifier: "station-alert", content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
+    }
+}
+
+extension TrackingController: CLLocationManagerDelegate {
+    nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        Task { @MainActor in self.feed(locations) }
+    }
+
+    nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        // 지하에서는 위치 실패가 정상. 무시하고 계속 대기
     }
 }
