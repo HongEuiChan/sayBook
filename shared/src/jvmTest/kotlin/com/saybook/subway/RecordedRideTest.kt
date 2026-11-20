@@ -31,7 +31,7 @@ class RecordedRideTest {
             ?: return
         for (csv in rides) {
             val r = replay(csv, useLocation = true)
-            println("${csv.name}: ${r.correct}/${r.total} 정답, 오탐 ${r.wrong}")
+            println("${csv.name}: ${r.correct}/${r.total} 정답, 오탐 ${r.wrong}  ${r.arrivals}")
             assertTrue(r.correct == r.total && r.wrong == 0, "${csv.name}: $r")
         }
     }

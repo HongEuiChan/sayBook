@@ -168,15 +168,30 @@ class TripTracker(
         return true
     }
 
-    /** 현재 역에서 [index] 까지 진행 방향 기준 정거장 수 (-1..2), 범위 밖이면 null */
+    /**
+     * 현재 역에서 [index] 까지 진행 방향 기준 정거장 수 (뒤쪽이면 음수).
+     * 순환선은 더 가까운 쪽으로 셈. 후보 범위 제한은 [StationMatcher] 가 담당.
+     */
     private fun stepsTo(index: Int): Int? {
         val s = state
         if (index == s.currentIndex) return 0
-        if (s.line.previousIndex(s.currentIndex, s.direction) == index) return -1
-        val next = s.line.nextIndex(s.currentIndex, s.direction) ?: return null
-        if (next == index) return 1
-        if (s.line.nextIndex(next, s.direction) == index) return 2
-        return null
+        var fwd: Int? = null
+        var i = s.currentIndex
+        for (k in 1..s.line.size) {
+            i = s.line.nextIndex(i, s.direction) ?: break
+            if (i == index) { fwd = k; break }
+        }
+        var back: Int? = null
+        i = s.currentIndex
+        for (k in 1..s.line.size) {
+            i = s.line.previousIndex(i, s.direction) ?: break
+            if (i == index) { back = k; break }
+        }
+        return when {
+            fwd != null && (back == null || fwd <= back) -> fwd
+            back != null -> -back
+            else -> null
+        }
     }
 
     internal fun updateFeatures(features: MotionFeatures) {
@@ -217,6 +232,7 @@ class StationAlertSession(
     private var listener: ((TrackerUpdate) -> Unit)? = null
     private var lastFeatureEmitMs = Long.MIN_VALUE
     private var lastFixMs: Long? = null
+    private val locationFilter = LocationFilter()
 
     var locationConfig: LocationConfig = LocationConfig()
 
@@ -257,12 +273,17 @@ class StationAlertSession(
      *    '역사에 들어왔다' 는 신호로 감지기에 전달 (정차 확정을 앞당김)
      */
     fun onLocation(fix: LocationFix) {
-        if (fix.accuracyM > locationConfig.maxAccuracyM) return
+        if (!locationFilter.accept(fix, locationConfig)) return
         val gap = lastFixMs?.let { fix.timestampMs - it }
         lastFixMs = fix.timestampMs
         if (tracker.state.phase == TripPhase.FINISHED) return
 
         val matched = StationMatcher.match(tracker.state, fix, locationConfig)
+            ?: if (fix.accuracyM <= locationConfig.catchUpMaxAccuracyM) {
+                StationMatcher.matchAnywhere(tracker.state.line, fix, locationConfig)
+            } else {
+                null
+            }
         if (matched != null) {
             val stopped = detector.features.motionClass == MotionClass.STILL ||
                 detector.state == TrainMotionDetector.State.STOPPED ||

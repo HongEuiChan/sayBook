@@ -33,7 +33,52 @@ data class LocationConfig(
     val matchAccuracyAllowanceM: Double = 250.0,
     /** 좌표 매칭: 두 번째로 가까운 후보 역보다 이만큼은 더 가까워야 함 (모호하면 무시) */
     val matchMarginM: Double = 150.0,
+    /**
+     * 주변 후보(이전 역~다다음 역) 밖으로 크게 건너뛰는 보정은 이 정확도 이하의 위치로만.
+     * 출발역을 잘못 골랐을 때 바로잡는 용도. 실측에서 1,700~2,200m 짜리 위치로 건너뛰다 3정거장 틀림.
+     */
+    val catchUpMaxAccuracyM: Double = 60.0,
+    /** 직전에 믿은 위치에서 이보다 빠르게 이동한 것으로 나오는 위치는 버림 (신분당선 최고 약 25m/s) */
+    val maxTrainSpeedMps: Double = 35.0,
+    /**
+     * 똑같은 좌표가 [stickyMinCount] 번 이상, [stickyMinSpanMs] 넘게 걸쳐 반복되면 고정된 엉터리 위치
+     * (다른 곳에 등록된 와이파이, 캐시)로 보고 그 좌표를 계속 무시.
+     * 실측: 열차가 정자·동천에 있을 때도 같은 좌표가 20번 넘게 들어왔고, 한 번은 정확도 193m 라고 주장.
+     */
+    val stickyMinCount: Int = 3,
+    val stickyMinSpanMs: Long = 120_000,
 )
+
+/** 엉터리 위치를 걸러내는 필터 (반복 좌표, 낮은 정확도, 불가능한 이동 속도) */
+internal class LocationFilter {
+    private val seen = HashMap<Pair<Long, Long>, MutableList<Long>>()
+    private val blocked = HashSet<Pair<Long, Long>>()
+    private var lastTrusted: LocationFix? = null
+
+    fun accept(fix: LocationFix, config: LocationConfig): Boolean {
+        // 1. 반복 좌표 (정확도와 무관하게 모든 위치로 집계)
+        val key = (fix.latitude * 10_000).toLong() to (fix.longitude * 10_000).toLong()
+        if (key in blocked) return false
+        val times = seen.getOrPut(key) { mutableListOf() }
+        times += fix.timestampMs
+        if (times.size >= config.stickyMinCount && times.last() - times.first() >= config.stickyMinSpanMs) {
+            blocked += key
+            return false
+        }
+        // 2. 정확도
+        if (fix.accuracyM > config.maxAccuracyM) return false
+        // 3. 이동 속도: 더 정확한 위치가 덜 정확한 위치를 이김
+        val last = lastTrusted
+        if (last != null) {
+            val dt = (fix.timestampMs - last.timestampMs) / 1000.0
+            val d = StationMatcher.distanceM(last.latitude, last.longitude, fix.latitude, fix.longitude) -
+                fix.accuracyM - last.accuracyM
+            if (dt in 0.0..600.0 && d > config.maxTrainSpeedMps * dt && fix.accuracyM >= last.accuracyM) return false
+        }
+        lastTrusted = fix
+        return true
+    }
+}
 
 internal object StationMatcher {
 
@@ -53,6 +98,19 @@ internal object StationMatcher {
         val (best, d1) = ranked.first()
         val limit = config.matchRadiusM + fix.accuracyM.coerceAtMost(config.matchAccuracyAllowanceM)
         if (d1 > limit) return null
+        val d2 = ranked.getOrNull(1)?.second
+        if (d2 != null && d2 - d1 < config.matchMarginM) return null
+        return best
+    }
+
+    /** 노선 전체에서 [fix] 와 확실히 맞는 역 (크게 건너뛰는 보정용, 정확한 위치에만 사용) */
+    fun matchAnywhere(line: SubwayLine, fix: LocationFix, config: LocationConfig): Int? {
+        val ranked = line.stations.indices
+            .filter { line.stations[it].hasCoordinates }
+            .map { it to distanceM(fix.latitude, fix.longitude, line.stations[it].latitude!!, line.stations[it].longitude!!) }
+            .sortedBy { it.second }
+        val (best, d1) = ranked.firstOrNull() ?: return null
+        if (d1 > config.matchRadiusM + fix.accuracyM) return null
         val d2 = ranked.getOrNull(1)?.second
         if (d2 != null && d2 - d1 < config.matchMarginM) return null
         return best

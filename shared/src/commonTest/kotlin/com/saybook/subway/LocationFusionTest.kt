@@ -131,8 +131,34 @@ class LocationFusionTest {
         session.onLocation(LocationFix(1_000, 37.505, 127.0, 30.0))
         // 너무 부정확
         session.onLocation(LocationFix(2_000, 37.51, 127.0, 3_000.0))
-        // 후보 범위 밖 (역5 는 세 정거장 앞)
-        session.onLocation(fixAt(3_000, 5))
+        // 후보 범위 밖 (역5 는 다섯 정거장 앞) + 건너뛰기엔 부정확 (100m)
+        session.onLocation(fixAt(3_000, 5, accuracy = 100.0))
+        assertEquals("역0", session.state.currentStation.name)
+    }
+
+    @Test
+    fun accurateFixFarAwayCatchesUp() {
+        // 출발역을 잘못 골랐어도, 아주 정확한 위치(30m)면 멀리 있는 역으로 바로잡음
+        val session = StationAlertSession(geoLine, 0, Direction.FORWARD)
+        session.onLocation(fixAt(1_000, 5, accuracy = 30.0))
+        assertEquals("역5", session.state.currentStation.name)
+    }
+
+    @Test
+    fun stickyRepeatedCoordinatesAreIgnored() {
+        // 같은 좌표가 2분 넘게 반복 → 고정된 엉터리 위치로 보고, 이후 정확해 보여도 무시
+        val session = StationAlertSession(geoLine, 0, Direction.FORWARD)
+        listOf(0L, 60_000L, 130_000L).forEach { session.onLocation(fixAt(it, 1, accuracy = 500.0)) }
+        session.onLocation(fixAt(140_000, 1, accuracy = 40.0))
+        assertEquals("역0", session.state.currentStation.name)
+    }
+
+    @Test
+    fun impossibleJumpIsIgnored() {
+        val session = StationAlertSession(geoLine, 0, Direction.FORWARD)
+        session.onLocation(fixAt(0, 0, accuracy = 20.0))
+        // 10초 만에 2.2km (220m/s) → 버림
+        session.onLocation(fixAt(10_000, 2, accuracy = 40.0))
         assertEquals("역0", session.state.currentStation.name)
     }
 
