@@ -32,6 +32,11 @@ data class TrackerState(
     val phase: TripPhase,
     val stationsPassed: Int = 0,
     val features: MotionFeatures = MotionFeatures(),
+    /**
+     * 현재 역을 아는지. 탑승 후 몇 정거장 지나 앱을 켜고 출발역을 고르지 않은 경우 false 로 시작하고,
+     * 역사에서 정확한 위치가 잡히는 순간 true 가 됩니다. false 인 동안 [currentIndex] 는 의미 없음.
+     */
+    val located: Boolean = true,
 ) {
     val currentStation: Station get() = line.stations[currentIndex]
     val nextIndex: Int? get() = line.nextIndex(currentIndex, direction)
@@ -61,6 +66,7 @@ class TripTracker(
     line: SubwayLine,
     startIndex: Int,
     direction: Direction,
+    located: Boolean = true,
 ) {
     init {
         require(startIndex in line.stations.indices) { "startIndex out of range: $startIndex" }
@@ -70,13 +76,15 @@ class TripTracker(
         line = line,
         direction = direction,
         currentIndex = startIndex,
-        phase = if (line.nextIndex(startIndex, direction) == null) TripPhase.FINISHED else TripPhase.AT_STATION,
+        phase = if (located && line.nextIndex(startIndex, direction) == null) TripPhase.FINISHED else TripPhase.AT_STATION,
+        located = located,
     )
         private set
 
     fun onEvent(event: DetectorEvent): StationAlert? {
         val s = state
         if (s.phase == TripPhase.FINISHED) return null
+        if (!s.located) return onEventUnlocated(event)
         return when (event) {
             is DetectorEvent.Departed -> {
                 if (s.phase != TripPhase.AT_STATION) return null
@@ -110,8 +118,33 @@ class TripTracker(
         }
     }
 
+    /** 현재 역을 모를 때: 정차/출발만 따라가고 역 이름은 위치가 잡힐 때까지 보류 */
+    private fun onEventUnlocated(event: DetectorEvent): StationAlert? {
+        val s = state
+        return when (event) {
+            is DetectorEvent.Departed, is DetectorEvent.Resumed -> {
+                state = s.copy(phase = TripPhase.RUNNING)
+                null
+            }
+            is DetectorEvent.Arrived -> {
+                if (s.phase == TripPhase.AT_STATION) return null
+                state = s.copy(phase = TripPhase.AT_STATION, stationsPassed = s.stationsPassed + 1)
+                AlertTexts.arrivedUnlocated(state)
+            }
+            is DetectorEvent.HaltedBetweenStations -> {
+                state = s.copy(phase = TripPhase.HALTED_BETWEEN)
+                null
+            }
+            is DetectorEvent.DepartureCancelled -> {
+                state = s.copy(phase = TripPhase.AT_STATION)
+                null
+            }
+        }
+    }
+
     /** 사용자 보정: 감지가 한 역을 놓쳤을 때 한 역 앞으로 */
     fun stepForward(): StationAlert? {
+        if (!state.located) return null
         val next = state.nextIndex ?: return null
         state = state.copy(
             currentIndex = next,
@@ -123,6 +156,7 @@ class TripTracker(
 
     /** 사용자 보정: 정차를 잘못 감지했을 때 한 역 뒤로 */
     fun stepBack(): StationAlert? {
+        if (!state.located) return null
         val prev = state.line.previousIndex(state.currentIndex, state.direction) ?: return null
         state = state.copy(
             currentIndex = prev,
@@ -138,6 +172,16 @@ class TripTracker(
      */
     internal fun snapTo(index: Int): StationAlert? {
         val s = state
+        if (!s.located) {
+            // 처음으로 현재 역 확인
+            val isTerminal = s.line.nextIndex(index, s.direction) == null
+            state = s.copy(
+                currentIndex = index,
+                phase = if (isTerminal) TripPhase.FINISHED else TripPhase.AT_STATION,
+                located = true,
+            )
+            return if (isTerminal) AlertTexts.terminal(state) else AlertTexts.arrived(state)
+        }
         val delta = stepsTo(index) ?: return null
         if (delta == 0 && s.phase == TripPhase.AT_STATION) return null
         val isTerminal = s.line.nextIndex(index, s.direction) == null
@@ -156,6 +200,11 @@ class TripTracker(
     /** GPS 로 확인된 역 [index] 에 열차가 진입 중 (아직 움직이는 중): 그 역을 '다음 역' 으로 맞춤 */
     internal fun approach(index: Int): Boolean {
         val s = state
+        if (!s.located) {
+            val prev = s.line.previousIndex(index, s.direction) ?: return false
+            state = s.copy(currentIndex = prev, phase = TripPhase.RUNNING, located = true)
+            return true
+        }
         val delta = stepsTo(index) ?: return false
         if (delta == 0) return false // 방금 떠난 역의 위치
         val prev = s.line.previousIndex(index, s.direction) ?: return false
@@ -217,18 +266,29 @@ class TripTracker(
  * 센서 콜백에서 [onMotion] 을 호출하면 상태가 바뀔 때마다 리스너가 불립니다.
  * 같은 스레드에서만 호출하세요.
  */
-class StationAlertSession(
+class StationAlertSession internal constructor(
     line: SubwayLine,
     startIndex: Int,
     direction: Direction,
     config: DetectorConfig,
+    located: Boolean,
 ) {
+    constructor(line: SubwayLine, startIndex: Int, direction: Direction, config: DetectorConfig) :
+        this(line, startIndex, direction, config, located = true)
+
     /** Swift 에서는 Kotlin 기본 인자를 쓸 수 없어 별도 생성자를 둠 */
     constructor(line: SubwayLine, startIndex: Int, direction: Direction) :
-        this(line, startIndex, direction, DetectorConfig())
+        this(line, startIndex, direction, DetectorConfig(), located = true)
+
+    /**
+     * 출발역(현재 역)을 모를 때. 탑승 후 몇 정거장 지나 앱을 켠 경우.
+     * 정차/출발은 센서로 따라가고, 역사에서 정확한 위치가 잡히면 그때 현재 역을 확정합니다.
+     */
+    constructor(line: SubwayLine, direction: Direction) :
+        this(line, 0, direction, DetectorConfig(), located = false)
 
     private val detector = TrainMotionDetector(config)
-    private val tracker = TripTracker(line, startIndex, direction)
+    private val tracker = TripTracker(line, startIndex, direction, located)
     private var listener: ((TrackerUpdate) -> Unit)? = null
     private var lastFeatureEmitMs = Long.MIN_VALUE
     private var lastFixMs: Long? = null
@@ -278,7 +338,14 @@ class StationAlertSession(
         lastFixMs = fix.timestampMs
         if (tracker.state.phase == TripPhase.FINISHED) return
 
-        val matched = StationMatcher.match(tracker.state, fix, locationConfig)
+        val matched = if (!tracker.state.located) {
+            // 현재 역을 모름: 노선 전체에서 찾되 충분히 정확한 위치만
+            if (fix.accuracyM <= locationConfig.locateMaxAccuracyM) {
+                StationMatcher.matchAnywhere(tracker.state.line, fix, locationConfig)
+            } else {
+                null
+            }
+        } else StationMatcher.match(tracker.state, fix, locationConfig)
             ?: if (fix.accuracyM <= locationConfig.catchUpMaxAccuracyM) {
                 StationMatcher.matchAnywhere(tracker.state.line, fix, locationConfig)
             } else {

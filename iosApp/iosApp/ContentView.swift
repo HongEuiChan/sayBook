@@ -32,7 +32,8 @@ private struct SetupView: View {
 
     @State private var lineIndex = 0
     @State private var forward = true
-    @State private var stationIndex = 0
+    /// -1 = 모름 (몇 정거장 지나 앱을 켠 경우). 역사에서 위치가 잡히면 자동으로 확인
+    @State private var stationIndex = -1
     @State private var query = ""
     @State private var demo = false
 
@@ -52,7 +53,7 @@ private struct SetupView: View {
                     ForEach(lines.indices, id: \.self) { i in Text(lines[i].name).tag(i) }
                 }
                 .pickerStyle(.segmented)
-                .onChange(of: lineIndex) { _ in stationIndex = 0; query = "" }
+                .onChange(of: lineIndex) { _ in stationIndex = -1; query = "" }
 
                 Picker("방향", selection: $forward) {
                     Text(line.directionLabel(direction: .forward)).tag(true)
@@ -61,7 +62,21 @@ private struct SetupView: View {
                 .pickerStyle(.segmented)
             }
 
-            Section("탄 역") {
+            Section("지금 역") {
+                Button {
+                    stationIndex = -1
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text("모름 · 위치로 자동 확인")
+                                .fontWeight(stationIndex == -1 ? .bold : .regular)
+                                .foregroundStyle(.primary)
+                            Text("이미 몇 정거장 지났다면 이걸로 시작하세요").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if stationIndex == -1 { Image(systemName: "checkmark").foregroundStyle(line.swiftColor) }
+                    }
+                }
                 ForEach(filtered, id: \.0) { index, station in
                     Button {
                         stationIndex = index
@@ -86,7 +101,9 @@ private struct SetupView: View {
                 Button {
                     controller.start(line: line, startIndex: stationIndex, direction: direction, demo: demo)
                 } label: {
-                    Text("\(line.stations[stationIndex].name)에서 출발 · \(line.directionLabel(direction: direction))")
+                    Text(stationIndex >= 0
+                         ? "\(line.stations[stationIndex].name)에서 출발 · \(line.directionLabel(direction: direction))"
+                         : "시작 · \(line.directionLabel(direction: direction))")
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 6)
                 }

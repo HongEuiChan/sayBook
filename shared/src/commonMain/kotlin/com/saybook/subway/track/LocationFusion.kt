@@ -38,6 +38,8 @@ data class LocationConfig(
      * 출발역을 잘못 골랐을 때 바로잡는 용도. 실측에서 1,700~2,200m 짜리 위치로 건너뛰다 3정거장 틀림.
      */
     val catchUpMaxAccuracyM: Double = 60.0,
+    /** 현재 역을 모를 때(출발역 미선택) 처음 역을 확정하는 데 쓰는 위치의 최대 오차 */
+    val locateMaxAccuracyM: Double = 100.0,
     /** 직전에 믿은 위치에서 이보다 빠르게 이동한 것으로 나오는 위치는 버림 (신분당선 최고 약 25m/s) */
     val maxTrainSpeedMps: Double = 35.0,
     /**

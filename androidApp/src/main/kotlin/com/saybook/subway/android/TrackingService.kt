@@ -87,12 +87,17 @@ class TrackingService : Service(), SensorEventListener {
 
     private fun start(intent: Intent) {
         val line = SubwayLines.byId(intent.getStringExtra(EXTRA_LINE_ID) ?: "") ?: return stopSelf()
-        val startIndex = intent.getIntExtra(EXTRA_START_INDEX, 0)
+        val startIndex = intent.getIntExtra(EXTRA_START_INDEX, -1)
         val direction = Direction.valueOf(intent.getStringExtra(EXTRA_DIRECTION) ?: Direction.FORWARD.name)
         val demo = intent.getBooleanExtra(EXTRA_DEMO, false)
 
         stopSensors()
-        val newSession = StationAlertSession(line, startIndex, direction)
+        // startIndex < 0: 출발역 모름 → 역사에서 위치가 잡히면 확인
+        val newSession = if (startIndex in line.stations.indices) {
+            StationAlertSession(line, startIndex, direction)
+        } else {
+            StationAlertSession(line, direction)
+        }
         session = newSession
 
         ServiceCompat.startForeground(
@@ -243,7 +248,10 @@ class TrackingService : Service(), SensorEventListener {
         val (title, subtitle) = AlertTexts.compact(state)
         val alert = update.alert
         overlay.update(title, subtitle)
-        if (alert != null && (alert.kind == AlertKind.ARRIVED || alert.kind == AlertKind.TERMINAL)) {
+        // 역을 확인한 상태의 도착만 큰 배너로 (출발역 미선택 상태의 '정차 중' 은 작은 표시만)
+        if (alert != null && alert.important && state.located &&
+            (alert.kind == AlertKind.ARRIVED || alert.kind == AlertKind.TERMINAL)
+        ) {
             val next = state.nextStation?.name
             overlay.showArrival(
                 label = if (alert.kind == AlertKind.TERMINAL) "종착역" else "이번 역",

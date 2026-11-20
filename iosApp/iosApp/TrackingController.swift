@@ -43,7 +43,10 @@ final class TrackingController: NSObject, ObservableObject {
 
     func start(line: SubwayLine, startIndex: Int, direction: Direction, demo: Bool) {
         stop()
-        let newSession = StationAlertSession(line: line, startIndex: Int32(startIndex), direction: direction)
+        // startIndex < 0: 출발역 모름 → 역사에서 위치가 잡히면 확인
+        let newSession = startIndex >= 0 && startIndex < line.stations.count
+            ? StationAlertSession(line: line, startIndex: Int32(startIndex), direction: direction)
+            : StationAlertSession(line: line, direction: direction)
         session = newSession
         state = newSession.state
         startLiveActivity(newSession.state)

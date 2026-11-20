@@ -145,6 +145,33 @@ class LocationFusionTest {
     }
 
     @Test
+    fun unknownStartStationIsFoundFromLocation() {
+        // 출발역을 모르는 채로 시작 → 정차는 이름 없이 → 역3 에서 정확한 위치 → 역3 확정
+        val session = StationAlertSession(geoLine, Direction.FORWARD)
+        val alerts = mutableListOf<StationAlert>()
+        session.setListener { u -> u.alert?.let { alerts += it } }
+        RideSimulator(6).generate(RideSimulator.typicalRide(stations = 1)).forEach(session::onSample)
+        assertTrue(!session.state.located)
+        assertTrue(alerts.none { it.important }, "역을 모를 땐 크게 알리지 않음: $alerts")
+
+        session.onLocation(fixAt(500_000, 3, accuracy = 80.0))
+        assertTrue(session.state.located)
+        assertEquals("역3", session.state.currentStation.name)
+        assertEquals("이번 역 · 역3", alerts.last().title)
+
+        // 이후는 평소처럼 센서로 진행
+        RideSimulator(7).generate(RideSimulator.typicalRide(stations = 1), startMs = 600_000).forEach(session::onSample)
+        assertEquals("역4", session.state.currentStation.name)
+    }
+
+    @Test
+    fun unknownStartIgnoresInaccurateFix() {
+        val session = StationAlertSession(geoLine, Direction.FORWARD)
+        session.onLocation(fixAt(1_000, 3, accuracy = 150.0))
+        assertTrue(!session.state.located)
+    }
+
+    @Test
     fun stickyRepeatedCoordinatesAreIgnored() {
         // 같은 좌표가 2분 넘게 반복 → 고정된 엉터리 위치로 보고, 이후 정확해 보여도 무시
         val session = StationAlertSession(geoLine, 0, Direction.FORWARD)

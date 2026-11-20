@@ -38,8 +38,21 @@ object AlertTexts {
         important = false,
     )
 
+    /** 현재 역을 아직 모를 때의 정차 (조용히 표시만) */
+    fun arrivedUnlocated(s: TrackerState) = StationAlert(
+        kind = AlertKind.ARRIVED,
+        title = "정차 중 · 역 확인 중",
+        body = "역사에서 위치가 잡히면 역 이름을 알려드려요",
+        important = false,
+    )
+
     /** 영상 위 작은 오버레이에 쓰는 한 줄 요약: (큰 글씨, 작은 글씨) */
-    fun compact(s: TrackerState): Pair<String, String> = when (s.phase) {
+    fun compact(s: TrackerState): Pair<String, String> = if (!s.located) {
+        "역 확인 중" to when (s.phase) {
+            TripPhase.AT_STATION -> "정차 중 · 위치가 잡히면 표시돼요"
+            else -> "${s.line.name} ${s.directionLabel} · 주행 중"
+        }
+    } else when (s.phase) {
         TripPhase.AT_STATION -> s.currentStation.name to "이번 역 · 다음 ${s.nextStation?.name ?: "-"}"
         TripPhase.RUNNING -> (s.nextStation?.name ?: "-") to "다음 역 · ${s.currentStation.name} 출발"
         TripPhase.HALTED_BETWEEN -> (s.nextStation?.name ?: "-") to "다음 역 · 잠시 정차 중"

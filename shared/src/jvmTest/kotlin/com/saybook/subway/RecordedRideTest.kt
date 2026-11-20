@@ -36,10 +36,34 @@ class RecordedRideTest {
         }
     }
 
-    data class Result(val total: Int, val correct: Int, val wrong: Int, val arrivals: List<Pair<Int, String>>)
+    /** 출발역을 고르지 않고(몇 정거장 지나 앱을 켬) 시작해도 위치로 역을 찾아 맞혀야 함 */
+    @Test
+    fun recordedRidesWithUnknownStartStation() {
+        val rides = dir?.listFiles { f -> f.extension == "csv" && File(f.path.removeSuffix(".csv") + ".truth").exists() }
+            ?: return
+        for (csv in rides) {
+            val r = replay(csv, useLocation = true, unknownStart = true)
+            println("${csv.name} (출발역 모름): ${r.correct}/${r.total} 정답, 오탐 ${r.wrong}, 첫 확인 ${r.locatedAt}초  ${r.arrivals}")
+            // 첫 정차 전에 탄 역을 확인한 것은 오탐이 아님
+            assertTrue(r.wrongAfterFirstStop == 0, "${csv.name}: $r")
+            // 역을 확인하기 전의 정차는 이름을 모르는 게 정상 → 확인 이후 정차만 채점
+            assertTrue(r.correctAfterLocated == r.totalAfterLocated, "${csv.name}: $r")
+        }
+    }
+
+    data class Result(
+        val total: Int,
+        val correct: Int,
+        val wrong: Int,
+        val arrivals: List<Pair<Int, String>>,
+        val locatedAt: Int? = null,
+        val totalAfterLocated: Int = total,
+        val correctAfterLocated: Int = correct,
+        val wrongAfterFirstStop: Int = wrong,
+    )
 
     companion object {
-        fun replay(csv: File, useLocation: Boolean): Result {
+        fun replay(csv: File, useLocation: Boolean, unknownStart: Boolean = false): Result {
             val truth = File(csv.path.removeSuffix(".csv") + ".truth").readLines().filter { it.isNotBlank() }.map {
                 val (name, a, b) = it.split(',')
                 Triple(name.trim(), a.trim().toInt(), b.trim().toInt())
@@ -48,15 +72,21 @@ class RecordedRideTest {
             var t0 = -1L
             var lastS = 0L
             val arrivals = mutableListOf<Pair<Int, String>>()
+            var locatedAt: Int? = null
             csv.forEachLine { l ->
                 val p = l.split(',')
                 when (p[0]) {
                     "H" -> {
                         val line = SubwayLines.byId(p[2]) ?: error("unknown line ${p[2]}")
-                        session = StationAlertSession(line, p[3].toInt(), Direction.valueOf(p[4])).also { s ->
+                        val dir = Direction.valueOf(p[4])
+                        session = (
+                            if (unknownStart) StationAlertSession(line, dir) else StationAlertSession(line, p[3].toInt(), dir)
+                            ).also { s ->
                             s.setListener { u ->
+                                val now = ((lastS - t0) / 1000).toInt()
+                                if (u.state.located && locatedAt == null) locatedAt = now
                                 val kind = u.alert?.kind
-                                if (kind == AlertKind.ARRIVED || kind == AlertKind.TERMINAL) {
+                                if (u.state.located && (kind == AlertKind.ARRIVED || kind == AlertKind.TERMINAL)) {
                                     arrivals += ((lastS - t0) / 1000).toInt() to u.state.currentStation.name
                                 }
                             }
@@ -74,9 +104,18 @@ class RecordedRideTest {
                     }
                 }
             }
-            val correct = truth.count { (name, a, b) -> arrivals.any { it.second == name && it.first in a..b } }
+            fun hit(name: String, a: Int, b: Int) = arrivals.any { it.second == name && it.first in a..b }
+            val correct = truth.count { (name, a, b) -> hit(name, a, b) }
             val wrong = arrivals.count { (ts, name) -> truth.none { it.first == name && ts in it.second..it.third } }
-            return Result(truth.size, correct, wrong, arrivals)
+            val after = truth.filter { locatedAt != null && it.third >= locatedAt!! }
+            return Result(
+                truth.size, correct, wrong, arrivals, locatedAt,
+                totalAfterLocated = after.size,
+                correctAfterLocated = after.count { (name, a, b) -> hit(name, a, b) },
+                wrongAfterFirstStop = arrivals.count { (ts, name) ->
+                    ts >= truth.first().second && truth.none { it.first == name && ts in it.second..it.third }
+                },
+            )
         }
     }
 }

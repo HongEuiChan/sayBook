@@ -123,7 +123,8 @@ private fun ColumnScope.SetupScreen() {
     val context = LocalContext.current
     var lineId by rememberSaveable { mutableStateOf(SubwayLines.all.first().id) }
     var direction by rememberSaveable { mutableStateOf(Direction.FORWARD) }
-    var stationIndex by rememberSaveable { mutableIntStateOf(0) }
+    // -1 = 모름 (몇 정거장 지나 앱을 켠 경우). 역사에서 위치가 잡히면 자동으로 확인
+    var stationIndex by rememberSaveable { mutableIntStateOf(UNKNOWN_STATION) }
     var query by rememberSaveable { mutableStateOf("") }
     var demo by rememberSaveable { mutableStateOf(false) }
     val line = SubwayLines.byId(lineId) ?: SubwayLines.all.first()
@@ -137,7 +138,7 @@ private fun ColumnScope.SetupScreen() {
         SubwayLines.all.forEach { l ->
             FilterChip(
                 selected = l.id == lineId,
-                onClick = { lineId = l.id; stationIndex = 0; query = "" },
+                onClick = { lineId = l.id; stationIndex = UNKNOWN_STATION; query = "" },
                 label = { Text(l.name) },
                 leadingIcon = { Box(Modifier.size(10.dp).background(l.color(), CircleShape)) },
             )
@@ -154,7 +155,7 @@ private fun ColumnScope.SetupScreen() {
     OutlinedTextField(
         value = query,
         onValueChange = { query = it },
-        label = { Text("탄 역 검색") },
+        label = { Text("지금 역 검색 (모르면 비워 두세요)") },
         singleLine = true,
         modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
     )
@@ -162,6 +163,22 @@ private fun ColumnScope.SetupScreen() {
     val listState = rememberLazyListState()
     val filtered = line.stations.withIndex().filter { query.isBlank() || it.value.name.contains(query.trim()) }
     LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth()) {
+        item(key = "unknown") {
+            val selected = stationIndex == UNKNOWN_STATION
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { stationIndex = UNKNOWN_STATION }
+                    .background(if (selected) line.color().copy(alpha = 0.15f) else Color.Transparent)
+                    .padding(vertical = 12.dp, horizontal = 8.dp),
+            ) {
+                Column {
+                    Text("모름 · 위치로 자동 확인", fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
+                    Text("이미 몇 정거장 지났다면 이걸로 시작하세요", fontSize = 12.sp, color = Color.Gray)
+                }
+            }
+            HorizontalDivider()
+        }
         itemsIndexed(filtered, key = { _, s -> "${line.id}-${s.index}" }) { _, (index, station) ->
             val selected = index == stationIndex
             Row(
@@ -186,12 +203,14 @@ private fun ColumnScope.SetupScreen() {
         Text("데모 모드 (가상 센서 데이터, 10배속)", fontSize = 13.sp)
     }
 
-    val start = line.stations[stationIndex].name
+    val start = line.stations.getOrNull(stationIndex)?.name
     Button(
         onClick = { TrackingService.start(context, line.id, stationIndex, direction, demo) },
         modifier = Modifier.fillMaxWidth().height(52.dp),
-    ) { Text("$start 에서 출발 · ${line.directionLabel(direction)}") }
+    ) { Text(if (start != null) "$start 에서 출발 · ${line.directionLabel(direction)}" else "시작 · ${line.directionLabel(direction)}") }
 }
+
+private const val UNKNOWN_STATION = -1
 
 @Composable
 private fun ColumnScope.TrackingScreen(state: TrackerState) {
